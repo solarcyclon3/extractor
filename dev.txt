@@ -1,0 +1,136 @@
+(async function() {
+    // --- CONFIGURATION ---
+    const WAIT_TIME_VIDEO = 3500; // Time to wait for link/iframe to appear
+    const WAIT_TIME_PAGE = 5000;  // Time to wait after clicking "Next Page"
+    
+    // --- STORAGE ---
+    let finalResults = [];
+    let capturedM3u8 = null;
+
+    // --- STEP 1: NETWORK SPY (Intercepts m3u8) ---
+    function captureUrl(url) {
+        if (url.includes("index.m3u8")) {
+            capturedM3u8 = url;
+        }
+    }
+
+    const originalOpen = XMLHttpRequest.prototype.open;
+    XMLHttpRequest.prototype.open = function(method, url) {
+        if (typeof url === "string") captureUrl(url);
+        return originalOpen.apply(this, arguments);
+    };
+
+    const originalFetch = window.fetch;
+    window.fetch = async function(...args) {
+        const url = args[0] ? args[0].toString() : "";
+        captureUrl(url);
+        return originalFetch.apply(this, args);
+    };
+
+    // --- STEP 2: HELPER FUNCTIONS ---
+    
+    // Check if a YouTube iframe exists in the DOM
+    function checkForYouTube() {
+        const iframes = document.querySelectorAll('iframe');
+        for (let iframe of iframes) {
+            if (iframe.src.includes("youtube") || iframe.src.includes("youtu.be")) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // --- STEP 3: MAIN LOGIC ---
+    async function processCurrentPage(pageNumber) {
+        const videoListItems = document.querySelectorAll('.video-list');
+        console.log(`%c[PAGE ${pageNumber}] Found ${videoListItems.length} videos.`, "color: yellow");
+
+        for (let i = 0; i < videoListItems.length; i++) {
+            const container = videoListItems[i];
+            
+            // Get Title
+            const titleEl = container.querySelector('p.break-all');
+            const title = titleEl ? titleEl.innerText.trim() : `Video ${i+1}`;
+            
+            console.log(`Processing: ${title}...`);
+
+            // Reset Capture
+            capturedM3u8 = null;
+
+            // Click Video
+            const clickableDiv = container.querySelector('div.flex.justify-between') || container;
+            clickableDiv.click();
+
+            // Wait for Network or Iframe
+            await new Promise(resolve => setTimeout(resolve, WAIT_TIME_VIDEO));
+
+            // Determine Source
+            let resultUrl = "Link not found / Text only";
+            
+            if (capturedM3u8) {
+                resultUrl = capturedM3u8;
+                console.log(`%c   -> M3U8 Found`, "color: #00ff00");
+            } else if (checkForYouTube()) {
+                resultUrl = "YouTube Video";
+                console.log(`%c   -> YouTube Detected`, "color: orange");
+            } else {
+                console.log(`%c   -> No media detected`, "color: gray");
+            }
+
+            finalResults.push({ title: title, url: resultUrl });
+        }
+    }
+
+    // --- STEP 4: PAGINATION LOOP ---
+    let pageCount = 1;
+    let hasNextPage = true;
+
+    console.clear();
+    console.log("%cSTARTING AUTOMATION...", "color: #00ffff; font-size: 16px; font-weight: bold;");
+
+    while (hasNextPage) {
+        // 1. Process all videos on current page
+        await processCurrentPage(pageCount);
+
+        // 2. Find Next Button
+        // Based on your HTML: <li class="next"><a ...></a></li>
+        const nextLi = document.querySelector('li.next');
+        const nextButton = nextLi ? nextLi.querySelector('a') : null;
+
+        // Check if next button exists and isn't disabled (based on Aria or class)
+        // Usually if disabled, it might have a specific class or missing href
+        // We will try to click it.
+        
+        if (nextButton && !nextLi.classList.contains('disabled') && !nextLi.classList.contains('invisible')) {
+            console.log(`%cFinished Page ${pageCount}. Clicking Next...`, "color: cyan");
+            nextButton.click();
+            
+            pageCount++;
+            // Wait for new page to load items
+            await new Promise(resolve => setTimeout(resolve, WAIT_TIME_PAGE));
+            
+            // Sanity check: Did new items load?
+            const newItems = document.querySelectorAll('.video-list');
+            if (newItems.length === 0) {
+                console.log("Next page seems empty. Stopping.");
+                hasNextPage = false;
+            }
+        } else {
+            console.log("%cNo next page found or button disabled. Finishing.", "color: cyan");
+            hasNextPage = false;
+        }
+    }
+
+    // --- STEP 5: FINAL OUTPUT ---
+    console.clear();
+    console.log("%c--- FINAL COMPLETED LIST ---", "color: #00ff00; font-size: 20px; font-weight: bold;");
+    
+    let textOutput = "";
+    finalResults.forEach(item => {
+        textOutput += `${item.title}\n${item.url}\n\n`;
+    });
+    
+    console.log(textOutput);
+    console.log("%c(Copy the text above)", "color: gray;");
+
+})();
