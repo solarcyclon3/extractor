@@ -1,0 +1,144 @@
+(async function() {
+    // --- CONFIGURATION ---
+    const TIME_PER_VIDEO = 3500; // Time to wait for link to appear
+    const TIME_PER_PAGE = 6000;  // Time to wait after clicking Next Page
+    
+    // --- STORAGE ---
+    let fullLog = []; // Stores data for the .txt file
+    let capturedLink = null;
+
+    // --- STEP 1: NETWORK SPY ---
+    function catchUrl(url) {
+        if (url.includes("index.m3u8")) {
+            capturedLink = url;
+        }
+    }
+
+    // Intercept XHR
+    const originalOpen = XMLHttpRequest.prototype.open;
+    XMLHttpRequest.prototype.open = function(method, url) {
+        if (typeof url === "string") catchUrl(url);
+        return originalOpen.apply(this, arguments);
+    };
+
+    // Intercept Fetch
+    const originalFetch = window.fetch;
+    window.fetch = async function(...args) {
+        const url = args[0] ? args[0].toString() : "";
+        catchUrl(url);
+        return originalFetch.apply(this, args);
+    };
+
+    // --- STEP 2: HELPER FUNCTIONS ---
+    
+    function checkForYouTube() {
+        const iframes = document.querySelectorAll('iframe');
+        for (let iframe of iframes) {
+            if (iframe.src.includes("youtube") || iframe.src.includes("youtu.be")) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // Saves the list to a .txt file on your computer
+    function downloadTxtFile() {
+        const blob = new Blob([fullLog.join("\n\n")], { type: 'text/plain' });
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = `Course_Links_${Date.now()}.txt`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+    }
+
+    // --- STEP 3: MAIN LOGIC ---
+    let pageCount = 1;
+    let keepGoing = true;
+
+    console.clear();
+    console.log("%cSTARTING SCRAPER... DO NOT CLOSE THIS TAB.", "color: #00ffff; font-size: 16px; font-weight: bold;");
+
+    while (keepGoing) {
+        // Find all videos on current page
+        const videoListItems = document.querySelectorAll('.video-list');
+        console.log(`%c--- PROCESSING PAGE ${pageCount} (${videoListItems.length} videos) ---`, "color: yellow; font-weight: bold;");
+
+        for (let i = 0; i < videoListItems.length; i++) {
+            const container = videoListItems[i];
+            
+            // Get Title
+            const titleEl = container.querySelector('p.break-all');
+            const title = titleEl ? titleEl.innerText.trim() : `Video ${i+1}`;
+            
+            // Reset state
+            capturedLink = null;
+
+            // Click Video
+            const clickableDiv = container.querySelector('div.flex.justify-between') || container;
+            clickableDiv.click();
+
+            // Wait
+            await new Promise(resolve => setTimeout(resolve, TIME_PER_VIDEO));
+
+            // Determine Result
+            let finalLink = "Link not found";
+            let statusColor = "color: gray";
+
+            if (capturedLink) {
+                finalLink = capturedLink;
+                statusColor = "color: #00ff00"; // Green
+            } else if (checkForYouTube()) {
+                finalLink = "YouTube Video";
+                statusColor = "color: orange";
+            }
+
+            // Print IMMEDIATELY to console (Line by Line)
+            console.log(`%c${title}`, "font-weight: bold;");
+            console.log(`%c${finalLink}`, statusColor);
+            console.log("-----------------------------------");
+
+            // Add to memory for the file download
+            fullLog.push(`${title}\n${finalLink}`);
+        }
+
+        // --- PAGINATION LOGIC ---
+        // Find the "Next" li element
+        const nextLi = document.querySelector('li.next');
+        const nextBtn = nextLi ? nextLi.querySelector('a') : null;
+        
+        // Check if button exists and is not disabled
+        // Note: Some sites hide the next button, some add a 'disabled' class
+        const isLastPage = !nextBtn || nextLi.classList.contains('disabled') || nextLi.classList.contains('invisible') || nextLi.getAttribute('aria-disabled') === 'true';
+
+        if (!isLastPage) {
+            console.log(`%cPage ${pageCount} done. Moving to Page ${pageCount + 1}...`, "color: cyan");
+            
+            // Record the first video title of the CURRENT page to compare later
+            const oldFirstTitle = document.querySelector('.video-list p.break-all')?.innerText;
+
+            nextBtn.click();
+            
+            // Wait for load
+            await new Promise(resolve => setTimeout(resolve, TIME_PER_PAGE));
+            
+            // Check if page actually changed by comparing first video title
+            const newFirstTitle = document.querySelector('.video-list p.break-all')?.innerText;
+            
+            if (oldFirstTitle === newFirstTitle) {
+                console.log("%cWarning: Page content didn't change. We might be at the end.", "color: red");
+                keepGoing = false;
+            } else {
+                pageCount++;
+            }
+        } else {
+            console.log("%cNo Next button found. Reached end of course.", "color: cyan");
+            keepGoing = false;
+        }
+    }
+
+    // --- FINISH ---
+    console.log("%cDONE! Generating text file...", "color: #00ff00; font-size: 20px;");
+    downloadTxtFile();
+
+})();
