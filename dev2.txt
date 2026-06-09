@@ -10,15 +10,11 @@
     let fullLog   = [];
     let pageCount = 1;
 
-    // ── STEP 1: BUILD A PROPER PER-CLICK PROMISE-BASED INTERCEPTOR ────────────
-    // Instead of a shared variable, we queue "waiters" that resolve the moment
-    // a matching URL fires. This prevents any cross-video bleed.
-
+    // ── STEP 1: PROPER PER-CLICK PROMISE-BASED INTERCEPTOR ────────────
     const waiters = []; // array of { resolve, reject, timeoutId }
 
     function notifyWaiters(url) {
         if (!url.includes("index.m3u8")) return;
-        // Resolve the OLDEST waiter (FIFO) and remove it
         if (waiters.length > 0) {
             const waiter = waiters.shift();
             clearTimeout(waiter.timeoutId);
@@ -26,14 +22,12 @@
         }
     }
 
-    // Intercept XHR
     const originalOpen = XMLHttpRequest.prototype.open;
     XMLHttpRequest.prototype.open = function (method, url) {
         if (typeof url === "string") notifyWaiters(url);
         return originalOpen.apply(this, arguments);
     };
 
-    // Intercept Fetch
     const originalFetch = window.fetch;
     window.fetch = async function (...args) {
         const url = args[0] ? args[0].toString() : "";
@@ -41,15 +35,12 @@
         return originalFetch.apply(this, args);
     };
 
-    // Returns a Promise that resolves with the captured URL within `ms`,
-    // or resolves with null on timeout (no rejection — we handle nulls).
     function waitForLink(ms) {
         return new Promise((resolve) => {
             const timeoutId = setTimeout(() => {
-                // Remove this waiter from the queue if it timed out
                 const idx = waiters.findIndex(w => w.resolve === resolve);
                 if (idx !== -1) waiters.splice(idx, 1);
-                resolve(null); // null = not found within timeout
+                resolve(null); 
             }, ms);
             waiters.push({ resolve, reject: null, timeoutId });
         });
@@ -77,8 +68,22 @@
         document.body.removeChild(a);
     }
 
-    // Pause helper
     const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+    // Fix 1: Auto-scrolling to trigger lazy-loaded elements
+    async function scrollToBottom() {
+        let lastHeight = document.body.scrollHeight;
+        while (true) {
+            window.scrollTo(0, document.body.scrollHeight);
+            await sleep(1500); // Wait for lazy load to trigger
+            let newHeight = document.body.scrollHeight;
+            if (newHeight === lastHeight) break; // Reached bottom
+            lastHeight = newHeight;
+        }
+        // Scroll back to top to ensure clicks register properly
+        window.scrollTo(0, 0);
+        await sleep(500);
+    }
 
     // ── STEP 3: CLICK + WAIT + RETRY FOR A SINGLE VIDEO ──────────────────────
 
@@ -92,31 +97,29 @@
         for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
             if (attempt > 0) {
                 console.log(`%c  ↻ Retry ${attempt}/${MAX_RETRIES} for: "${title}"`, "color: orange");
-                await sleep(500); // tiny gap before re-click
+                await sleep(500); 
             }
 
-            // Click the video row
             const clickTarget = container.querySelector("div.flex.justify-between") || container;
+            
+            // Bring element into view before clicking (helps with stubborn UI frameworks)
+            clickTarget.scrollIntoView({ behavior: "smooth", block: "center" });
+            await sleep(300);
+            
             clickTarget.click();
 
-            // Wait for a network link to appear
             const waitMs = attempt === 0 ? WAIT_FOR_LINK : RETRY_WAIT;
             finalLink    = await waitForLink(waitMs);
 
-            if (finalLink) break; // ✅ Got it — stop retrying
+            if (finalLink) break; 
 
-            // No m3u8 found — maybe it's YouTube?
             if (checkForYouTube()) {
                 isYouTube = true;
                 break;
             }
-
-            // Otherwise loop and retry
         }
 
-        // ── Result ──
         let displayLink, statusColor;
-
         if (finalLink) {
             displayLink = finalLink;
             statusColor = "color: #00ff00";
@@ -139,21 +142,31 @@
 
     console.clear();
     console.log(
-        "%cSTARTING SCRAPER (fixed) — DO NOT CLOSE THIS TAB.",
+        "%cSTARTING SCRAPER (bulletproof) — DO NOT CLOSE THIS TAB.",
         "color: #00ffff; font-size: 16px; font-weight: bold;"
     );
 
     let keepGoing = true;
 
     while (keepGoing) {
-        const videoListItems = document.querySelectorAll(".video-list");
+        
+        console.log(`%cScrolling to load all items on Page ${pageCount}...`, "color: gray");
+        await scrollToBottom(); // Ensures all videos on this page are in the DOM
+
+        let videoListItems = document.querySelectorAll(".video-list");
         console.log(
             `%c─── PAGE ${pageCount} (${videoListItems.length} videos) ───`,
             "color: yellow; font-weight: bold;"
         );
 
         for (let i = 0; i < videoListItems.length; i++) {
-            await processVideo(videoListItems[i], i);
+            // Fix 2: Re-query the DOM inside the loop to avoid Stale/Detached Element errors
+            let freshDomItems = document.querySelectorAll(".video-list");
+            if (freshDomItems[i]) {
+                await processVideo(freshDomItems[i], i);
+            } else {
+                console.log(`%cElement ${i} vanished from DOM.`, "color: red");
+            }
         }
 
         // ── Pagination ──
@@ -169,6 +182,11 @@
             console.log(`%cPage ${pageCount} done → loading page ${pageCount + 1}…`, "color: cyan");
 
             const oldFirstTitle = document.querySelector(".video-list p.break-all")?.innerText;
+            
+            // Ensure next button is in view before clicking
+            if(nextBtn.scrollIntoView) nextBtn.scrollIntoView({ block: "center" });
+            await sleep(500);
+            
             nextBtn.click();
             await sleep(PAGE_WAIT);
 
