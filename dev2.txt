@@ -1,38 +1,64 @@
-(async function() {
-    // --- CONFIGURATION ---
-    const TIME_PER_VIDEO = 3500; // Time to wait for link to appear
-    const TIME_PER_PAGE = 6000;  // Time to wait after clicking Next Page
-    
-    // --- STORAGE ---
-    let fullLog = []; // Stores data for the .txt file
-    let capturedLink = null;
+(async function () {
 
-    // --- STEP 1: NETWORK SPY ---
-    function catchUrl(url) {
-        if (url.includes("index.m3u8")) {
-            capturedLink = url;
+    // ─── CONFIGURATION ────────────────────────────────────────────────────────
+    const WAIT_FOR_LINK   = 5000;   // ms to wait after clicking before checking
+    const RETRY_WAIT      = 4000;   // ms to wait on each retry
+    const MAX_RETRIES     = 3;      // how many extra attempts before giving up
+    const PAGE_WAIT       = 7000;   // ms to wait after clicking Next Page
+    // ──────────────────────────────────────────────────────────────────────────
+
+    let fullLog   = [];
+    let pageCount = 1;
+
+    // ── STEP 1: BUILD A PROPER PER-CLICK PROMISE-BASED INTERCEPTOR ────────────
+    // Instead of a shared variable, we queue "waiters" that resolve the moment
+    // a matching URL fires. This prevents any cross-video bleed.
+
+    const waiters = []; // array of { resolve, reject, timeoutId }
+
+    function notifyWaiters(url) {
+        if (!url.includes("index.m3u8")) return;
+        // Resolve the OLDEST waiter (FIFO) and remove it
+        if (waiters.length > 0) {
+            const waiter = waiters.shift();
+            clearTimeout(waiter.timeoutId);
+            waiter.resolve(url);
         }
     }
 
     // Intercept XHR
     const originalOpen = XMLHttpRequest.prototype.open;
-    XMLHttpRequest.prototype.open = function(method, url) {
-        if (typeof url === "string") catchUrl(url);
+    XMLHttpRequest.prototype.open = function (method, url) {
+        if (typeof url === "string") notifyWaiters(url);
         return originalOpen.apply(this, arguments);
     };
 
     // Intercept Fetch
     const originalFetch = window.fetch;
-    window.fetch = async function(...args) {
+    window.fetch = async function (...args) {
         const url = args[0] ? args[0].toString() : "";
-        catchUrl(url);
+        notifyWaiters(url);
         return originalFetch.apply(this, args);
     };
 
-    // --- STEP 2: HELPER FUNCTIONS ---
-    
+    // Returns a Promise that resolves with the captured URL within `ms`,
+    // or resolves with null on timeout (no rejection — we handle nulls).
+    function waitForLink(ms) {
+        return new Promise((resolve) => {
+            const timeoutId = setTimeout(() => {
+                // Remove this waiter from the queue if it timed out
+                const idx = waiters.findIndex(w => w.resolve === resolve);
+                if (idx !== -1) waiters.splice(idx, 1);
+                resolve(null); // null = not found within timeout
+            }, ms);
+            waiters.push({ resolve, reject: null, timeoutId });
+        });
+    }
+
+    // ── STEP 2: HELPERS ───────────────────────────────────────────────────────
+
     function checkForYouTube() {
-        const iframes = document.querySelectorAll('iframe');
+        const iframes = document.querySelectorAll("iframe");
         for (let iframe of iframes) {
             if (iframe.src.includes("youtube") || iframe.src.includes("youtu.be")) {
                 return true;
@@ -41,104 +67,126 @@
         return false;
     }
 
-    // Saves the list to a .txt file on your computer
     function downloadTxtFile() {
-        const blob = new Blob([fullLog.join("\n\n")], { type: 'text/plain' });
-        const a = document.createElement('a');
-        a.href = URL.createObjectURL(blob);
+        const blob = new Blob([fullLog.join("\n\n")], { type: "text/plain" });
+        const a    = document.createElement("a");
+        a.href     = URL.createObjectURL(blob);
         a.download = `Course_Links_${Date.now()}.txt`;
         document.body.appendChild(a);
         a.click();
         document.body.removeChild(a);
     }
 
-    // --- STEP 3: MAIN LOGIC ---
-    let pageCount = 1;
-    let keepGoing = true;
+    // Pause helper
+    const sleep = ms => new Promise(r => setTimeout(r, ms));
 
-    console.clear();
-    console.log("%cSTARTING SCRAPER... DO NOT CLOSE THIS TAB.", "color: #00ffff; font-size: 16px; font-weight: bold;");
+    // ── STEP 3: CLICK + WAIT + RETRY FOR A SINGLE VIDEO ──────────────────────
 
-    while (keepGoing) {
-        // Find all videos on current page
-        const videoListItems = document.querySelectorAll('.video-list');
-        console.log(`%c--- PROCESSING PAGE ${pageCount} (${videoListItems.length} videos) ---`, "color: yellow; font-weight: bold;");
+    async function processVideo(container, index) {
+        const titleEl = container.querySelector("p.break-all");
+        const title   = titleEl ? titleEl.innerText.trim() : `Video ${index + 1}`;
 
-        for (let i = 0; i < videoListItems.length; i++) {
-            const container = videoListItems[i];
-            
-            // Get Title
-            const titleEl = container.querySelector('p.break-all');
-            const title = titleEl ? titleEl.innerText.trim() : `Video ${i+1}`;
-            
-            // Reset state
-            capturedLink = null;
+        let finalLink  = null;
+        let isYouTube  = false;
 
-            // Click Video
-            const clickableDiv = container.querySelector('div.flex.justify-between') || container;
-            clickableDiv.click();
-
-            // Wait
-            await new Promise(resolve => setTimeout(resolve, TIME_PER_VIDEO));
-
-            // Determine Result
-            let finalLink = "Link not found";
-            let statusColor = "color: gray";
-
-            if (capturedLink) {
-                finalLink = capturedLink;
-                statusColor = "color: #00ff00"; // Green
-            } else if (checkForYouTube()) {
-                finalLink = "YouTube Video";
-                statusColor = "color: orange";
+        for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+            if (attempt > 0) {
+                console.log(`%c  ↻ Retry ${attempt}/${MAX_RETRIES} for: "${title}"`, "color: orange");
+                await sleep(500); // tiny gap before re-click
             }
 
-            // Print IMMEDIATELY to console (Line by Line)
-            console.log(`%c${title}`, "font-weight: bold;");
-            console.log(`%c${finalLink}`, statusColor);
-            console.log("-----------------------------------");
+            // Click the video row
+            const clickTarget = container.querySelector("div.flex.justify-between") || container;
+            clickTarget.click();
 
-            // Add to memory for the file download
-            fullLog.push(`${title}\n${finalLink}`);
+            // Wait for a network link to appear
+            const waitMs = attempt === 0 ? WAIT_FOR_LINK : RETRY_WAIT;
+            finalLink    = await waitForLink(waitMs);
+
+            if (finalLink) break; // ✅ Got it — stop retrying
+
+            // No m3u8 found — maybe it's YouTube?
+            if (checkForYouTube()) {
+                isYouTube = true;
+                break;
+            }
+
+            // Otherwise loop and retry
         }
 
-        // --- PAGINATION LOGIC ---
-        // Find the "Next" li element
-        const nextLi = document.querySelector('li.next');
-        const nextBtn = nextLi ? nextLi.querySelector('a') : null;
-        
-        // Check if button exists and is not disabled
-        // Note: Some sites hide the next button, some add a 'disabled' class
-        const isLastPage = !nextBtn || nextLi.classList.contains('disabled') || nextLi.classList.contains('invisible') || nextLi.getAttribute('aria-disabled') === 'true';
+        // ── Result ──
+        let displayLink, statusColor;
+
+        if (finalLink) {
+            displayLink = finalLink;
+            statusColor = "color: #00ff00";
+        } else if (isYouTube) {
+            displayLink = "YouTube Video";
+            statusColor = "color: orange";
+        } else {
+            displayLink = "Link not found (exhausted retries)";
+            statusColor = "color: red";
+        }
+
+        console.log(`%c${title}`, "font-weight: bold; color: white;");
+        console.log(`%c${displayLink}`, statusColor);
+        console.log("───────────────────────────────────");
+
+        fullLog.push(`${title}\n${displayLink}`);
+    }
+
+    // ── STEP 4: MAIN LOOP ─────────────────────────────────────────────────────
+
+    console.clear();
+    console.log(
+        "%cSTARTING SCRAPER (fixed) — DO NOT CLOSE THIS TAB.",
+        "color: #00ffff; font-size: 16px; font-weight: bold;"
+    );
+
+    let keepGoing = true;
+
+    while (keepGoing) {
+        const videoListItems = document.querySelectorAll(".video-list");
+        console.log(
+            `%c─── PAGE ${pageCount} (${videoListItems.length} videos) ───`,
+            "color: yellow; font-weight: bold;"
+        );
+
+        for (let i = 0; i < videoListItems.length; i++) {
+            await processVideo(videoListItems[i], i);
+        }
+
+        // ── Pagination ──
+        const nextLi   = document.querySelector("li.next");
+        const nextBtn  = nextLi ? nextLi.querySelector("a") : null;
+        const isLastPage =
+            !nextBtn ||
+            nextLi.classList.contains("disabled")  ||
+            nextLi.classList.contains("invisible") ||
+            nextLi.getAttribute("aria-disabled") === "true";
 
         if (!isLastPage) {
-            console.log(`%cPage ${pageCount} done. Moving to Page ${pageCount + 1}...`, "color: cyan");
-            
-            // Record the first video title of the CURRENT page to compare later
-            const oldFirstTitle = document.querySelector('.video-list p.break-all')?.innerText;
+            console.log(`%cPage ${pageCount} done → loading page ${pageCount + 1}…`, "color: cyan");
 
+            const oldFirstTitle = document.querySelector(".video-list p.break-all")?.innerText;
             nextBtn.click();
-            
-            // Wait for load
-            await new Promise(resolve => setTimeout(resolve, TIME_PER_PAGE));
-            
-            // Check if page actually changed by comparing first video title
-            const newFirstTitle = document.querySelector('.video-list p.break-all')?.innerText;
-            
+            await sleep(PAGE_WAIT);
+
+            const newFirstTitle = document.querySelector(".video-list p.break-all")?.innerText;
             if (oldFirstTitle === newFirstTitle) {
-                console.log("%cWarning: Page content didn't change. We might be at the end.", "color: red");
+                console.log("%cPage content unchanged — assuming last page.", "color: red");
                 keepGoing = false;
             } else {
                 pageCount++;
             }
         } else {
-            console.log("%cNo Next button found. Reached end of course.", "color: cyan");
+            console.log("%cNo Next button — end of course.", "color: cyan");
             keepGoing = false;
         }
     }
 
-    // --- FINISH ---
-    console.log("%cDONE! Generating text file...", "color: #00ff00; font-size: 20px;");
+    // ── Finish ──
+    console.log("%c✅ DONE! Generating file…", "color: #00ff00; font-size: 18px;");
     downloadTxtFile();
 
 })();
